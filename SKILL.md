@@ -146,6 +146,11 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 - **codex_task.md 必须包含：** 功能需求、**逐条列出须满足的 `AC-0x` 编号**（对齐 contract.json 的 acceptance）、禁止事项（不改测试）、文件输出路径
 - **opencode_task.md 必须包含：** 需测试的函数/接口及路径、测试框架要求（`node:test`）、覆盖要求（边界用例）、**文档须覆盖 `AC-03` 之类验收项**、禁止事项（不改业务实现）
 
+**任务卡须按运行 OS 动态注入「运行环境提示」（防跨平台写文件失败）：**
+- codex/opencode 常默认按 bash/Linux 生成命令（`cat << 'EOF'` heredoc、把整段补丁塞进 `apply_patch` 命令行参数）。若实际执行 shell 是 **Windows PowerShell**，这些命令会失败：heredoc 报 `Missing file specification after redirection operator`，apply_patch 塞参数报 `requires a UTF-8 PATCH argument`
+- **Claude 编排时判断当前 OS**：Windows（win32）→ 在**每份任务卡标题下**加 `## ⚠️ 运行环境提示（Windows / PowerShell）` 段，指明实际 shell 是 PowerShell、别用 bash heredoc、别用 apply_patch 塞参数、写文件用 `@'...'@ | Set-Content -Path <路径> -Encoding UTF8`；Linux/macOS → 不加
+- 为保持技能**跨 OS 通用**，**不要**把 Windows 提示硬编码进 `run_agent.sh` 等脚本——由编排者按当前 OS 注入任务卡（技能脚本保持平台无关）
+
 **每份任务卡末尾都必须附上【执行反馈】段（不改就丢了上报通道）：**
 ```
 【执行反馈】运行中若遇到：需求与设计不符、技术难点超出本任务、需要额外决策/信息，

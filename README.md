@@ -1,6 +1,6 @@
 # Quad Collaboration — 设计原理
 
-**版本 v5**（在 v4 反馈通道基础上，新增：**源码根自动对准**——`probe_src_roots.sh` 自动探查各类型源码根并写入 `source_roots.json`，`run_agent.sh` 据此把相关根自动注入 codex 可写区，根治并行 worktree"实现了却无处落盘"的历史大坑）
+**版本 v5.1**（在 v5 源码根自动对准基础上，新增：**任务卡按运行 OS 动态注入「运行环境提示」**——预防 codex/opencode 在 Windows 下按 bash 习惯写文件失败，见「异常协同」④ 后的专项说明；不改脚本，脚本保持平台无关）
 
 本文件说明 `quad-collaboration` 技能在**协调架构、通信机制、知识共享、异常协同**四个维度的设计思路。这是"为什么这么设计"，`SKILL.md` 是"怎么执行"。
 
@@ -170,6 +170,12 @@ run_agent.sh（file-first）→ 优先读 source_roots.json；文件不存在才
 - 任务卡脚本里写死 CLI 兜底查找路径（`/c/Users/.../npm`），找不到明确报错跳过而非静默。
 - 验收阶段 Claude 自行发现"命令环境坑"（如目录/路径写错）兜住，不甩给 agent。
 
+### 跨平台写文件适配（v5.1）—— 把"环境提示"前置到任务卡，而不是改脚本
+
+- **背景**：codex/opencode 常默认按 bash/Linux 思维生成命令——`cat << 'EOF'` heredoc、把整段补丁塞进 `apply_patch` 命令行参数。Windows 下 `shell_command` 实际执行的是 **PowerShell**，两类写法都会失败：heredoc 报 `Missing file specification after redirection operator`，apply_patch 报 `requires a UTF-8 PATCH argument`。实战中 codex 开局连失败 5 次后才自主切到 PowerShell here-string 写文件成功（见上方 ① 的案例）。
+- **决策**：**不改 run_agent.sh 等脚本硬编码平台提示**——技能跨 OS 通用，Linux/macOS 上误加会污染任务卡。改由 **Claude 编排时判断当前 OS**（win32）决定是否注入：Windows 才在每份任务卡标题下加 `## ⚠️ 运行环境提示（Windows / PowerShell）` 段，指明实际 shell 与正确的写文件姿势（PowerShell here-string + `Set-Content -Encoding UTF8`，内容统一 UTF-8 保证中文注释不乱码）。
+- **为什么在任务卡**：任务卡是编排者的产物，Claude 运行时自知平台，注入时机最准确；脚本保持平台无关，改动面最小。规则已固化进 SKILL.md 阶段 1（任务卡须按运行 OS 动态注入），使每次编排自动遵守、不再靠 agent 试错。
+
 ---
 
 ## 变更记录
@@ -181,6 +187,7 @@ run_agent.sh（file-first）→ 优先读 source_roots.json；文件不存在才
 | v3 | **通信可靠性增强**：+ `contract.json` 机器契约（接口/文件/数据格式/验收条件）+ `validate_contract.sh` 每次交接自动校验 + `state.json` 状态机 + 产物 hash（防陈旧） |
 | v4 | **上行反馈通道**：+ `feedback.md` + `feedback_loop.sh`（`check`/`consume`/`reset`）——agent 遇阻塞写文件、Claude 完成后轮询接管，带熔断(默认3轮)防死循环；解决并行定义歧义；run_agent 前后台模式；验收归属客观判定 |
 | v5 | **源码根自动对准**：+ `probe_src_roots.sh`（通用探查 backend/frontend/other 三类源码根，多语言清单，不硬编码路径）+ `write_source_roots.cjs`（生成带中文注释的 `source_roots.json`）+ `run_agent.sh` 改 file-first（优先读 `source_roots.json`、剥离 `//` 注释解析，文件缺失才探查并写回）、新增 `--add-root <type>` / `EXPLICIT_ADD_ROOTS=1`(all) 可写区注入、多根逐个 `--add-dir`。根治并行 worktree「实现了却无处落盘」的历史大坑 |
+| v5.1 | **跨平台写文件适配**：+ SKILL.md 阶段1 新增「任务卡须按运行 OS 动态注入运行环境提示」——Claude 编排时判断当前 OS，Windows 才在每份任务卡标题下注入 `## ⚠️ 运行环境提示（Windows / PowerShell）` 段（禁 bash heredoc / apply_patch 塞命令行参数，改用 PowerShell here-string + `Set-Content -Encoding UTF8`），Linux/macOS 不加。**不改脚本**（run_agent.sh 等保持平台无关），平台判断留在编排时 |
 
 ---
 
