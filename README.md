@@ -1,6 +1,6 @@
 # Quad Collaboration — 设计原理
 
-**版本 v4.1**（在 v4 反馈通道 + 熔断基础上，修复并行 worktree「codex 退出但无产出」：`run_agent.sh` 新增 `--sandbox-root`，把 codex 可写区对准 worktree 内真实源码树根；这是 `0.1 发布版`）
+**版本 v4.1**（在 v4 反馈通道 + 熔断基础上，修复并行 worktree「codex 退出但无产出」：`run_agent.sh` 新增 `--add-dir`，用 codex exec 的 `--add-dir` 把真实源码树根追加进可写区；这是 `0.1 发布版`）
 
 本文件说明 `quad-collaboration` 技能在**协调架构、通信机制、知识共享、异常协同**四个维度的设计思路。这是"为什么这么设计"，`SKILL.md` 是"怎么执行"。
 
@@ -148,7 +148,7 @@ Claude 读所有产出 → 验收（汇聚全部知识）
 | v2 | + 复杂时自动切并行（git worktree 隔离）；+ 冲突解决 agent；+ 四维度设计说明（本文） |
 | v3 | **通信可靠性增强**：+ `contract.json` 机器契约（接口/文件/数据格式/验收条件）+ `validate_contract.sh` 每次交接自动校验 + `state.json` 状态机 + 产物 hash（防陈旧） |
 | v4 | **上行反馈通道**：+ `feedback.md` + `feedback_loop.sh`（`check`/`consume`/`reset`）——agent 遇阻塞写文件、Claude 完成后轮询接管，带熔断(默认3轮)防死循环；解决并行定义歧义；run_agent 前后台模式；验收归属客观判定 |
-| v4.1 | **修复并行 worktree「退出但无产出」**：`run_agent.sh` 新增 `--sandbox-root <dir>`，把 codex 的 `workspace-write` 可写区显式对准 worktree 内**真实源码树根**，避免传入 worktree 根时 codex cwd 落进嵌套目录、源码树 `Access denied` 导致实现成功却无法落盘；路径归一化防 `-C` 与沙箱根失配；SKILL.md 增「并行 worktree 的正确跑法」+ 检查清单 |
+| v4.1 | **修复并行 worktree「退出但无产出」**：`run_agent.sh` 新增 `--add-dir <dir>`，用 codex exec 的 `--add-dir` 把 worktree 内**真实源码树根**追加进 `workspace-write` 可写区，避免传入 worktree 根时源码树 `Access denied` 导致实现成功却无法落盘；路径归一化防 `-C` 与可写区失配；SKILL.md 增「并行 worktree 的正确跑法」+ 检查清单 |
 
 ---
 

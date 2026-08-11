@@ -5,7 +5,7 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 
 # Quad Collaboration — 多智能体分工流水线
 
-**版本 v4**：v3 基础上，修复并行 worktree 场景「codex 退出但无产出」的根因；run_agent.sh 新增 `--sandbox-root` 可写区参数 + 版本说明。
+**版本 v4.1**：v4 修复并行 worktree「codex 退出但无产出」；v4.1 将 run_agent.sh 的可写区参数规范为 `--add-dir <dir>`（映射 codex exec 的 `--add-dir`，追加真实源码树根至可写区）。
 
 > ⚠️ **并行 worktree 必读（已踩坑，v4 强制）**：`run_agent.sh` 对 codex 使用 `--sandbox workspace-write`，**可写区默认只绑定到传入的 `project_dir`**。若把 worktree 根当 project_dir 直接传入（本应指向 worktree 内真实源码 `c-fi-hlj-ljkf-be/...`），codex 的 cwd 会落在 worktree 的 `/.orchestration/wt-*` 嵌套目录，**真实源码树在可写区外 → 全部 `Access denied` → codex 实现了任务却无处落盘（"退出但无产出"）**。正确跑法见下方「阶段 2 codex 实现」的并行分支与 run_agent 用法。
 
@@ -79,7 +79,7 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 - **进**：拆解出 ≥2 个独立子任务（如"实现功能A"和"实现功能B"改不同文件），各自独立、无先后依赖 → **并行跑 N 条 codex→opencode 子流水线**。
 - **出**：任一子任务产出被其他子任务依赖 → 必须等它完成再继续，不能提前聚合。
 - **并行时用 git worktree 隔离**每个子流水线的工作副本，避免直接改主目录互相覆盖（worktree 由 Claude 在执行前手工 `git worktree add` 创建，独立副本提交后再 merge）。
-- **并行 worktree 启动 codex 时，必须给 `run_agent.sh` 传 `--sandbox-root <wt>/<实际源码根>`**（见「阶段 2 并行 worktree 的正确跑法」），否则 codex 可写区绑错导致"退出但无产出"。
+- **并行 worktree 启动 codex 时，必须给 `run_agent.sh` 传 `--add-dir <wt>/<实际源码根>`**（见「阶段 2 并行 worktree 的正确跑法」），否则 codex 可写区绑错导致"退出但无产出"。
 
 ## 五阶段流水线
 
@@ -183,24 +183,24 @@ cd <project-dir> && scripts/run_agent.sh codex . "$(cat .orchestration/codex_tas
 
 #### 并行 worktree 的正确跑法（v4，防"退出但无产出"）
 
-并行时每个分支在独立 git worktree 中实现。**关键：`--sandbox-root` 必须指向该 worktree 内"真实源码树根"**（codex 要改的代码所在，如 `<wt>/c-fi-hlj-ljkf-be`），而不是 worktree 根或 `.orchestration` 嵌套目录。这样 `workspace-write` 可写区才覆盖 codex 按 `c-fi-hlj-ljkf-be/...` 相对路径写入的目标。
+并行时每个分支在独立 git worktree 中实现。**关键：`--add-dir` 必须指向该 worktree 内"真实源码树根"**（codex 要改的代码所在，如 `<wt>/c-fi-hlj-ljkf-be`），而不是 worktree 根或 `.orchestration` 嵌套目录。这样 `workspace-write` 可写区才覆盖 codex 按 `c-fi-hlj-ljkf-be/...` 相对路径写入的目标。
 
-> 若只传 worktree 根而不指定 `--sandbox-root`，codex 的 cwd 会落到 worktree 的 `.orchestration/wt-*` 嵌套目录，源码树在可写区外 → `Access denied` → 实现成功但文件无法落盘（本次 v3 踩坑：4 个 codex 全部"退出但无产出"）。**必须显式给沙箱根。**
+> 若只传 worktree 根而不指定 `--add-dir`，codex 的 cwd 会落到 worktree 的 `.orchestration/wt-*` 嵌套目录，源码树在可写区外 → `Access denied` → 实现成功但文件无法落盘（本次 v3 踩坑：4 个 codex 全部"退出但无产出"）。**必须显式追加源码树根。**
 
 ```bash
 # 1) 创建 worktree（在项目根）
 git worktree add <wt-1>   # 例如 .worktrees/feat-a
-# 2) 后台启动该分支的 codex，--sandbox-root 指到 worktree 内的源码树根
-cd <project-dir> && scripts/run_agent.sh codex <wt-1> "$(cat .orchestration/codex_task_feat_a.md)" --background --sandbox-root <wt-1>/c-fi-hlj-ljkf-be
+# 2) 后台启动该分支的 codex，--add-dir 追加到 worktree 内的源码树根
+cd <project-dir> && scripts/run_agent.sh codex <wt-1> "$(cat .orchestration/codex_task_feat_a.md)" --background --add-dir <wt-1>/c-fi-hlj-ljkf-be
 ```
 
-> 若每个 worktree 内源码根模块名不同（如 `c-fi-hlj-ljkf-be`、`other-src`），`--sandbox-root` 按各自实际目录传。`--background` 与 `--sandbox-root` 可任意顺序出现。
+> 若每个 worktree 内源码根模块名不同（如 `c-fi-hlj-ljkf-be`、`other-src`），`--add-dir` 按各自实际目录传。`--background` 与 `--add-dir` 可任意顺序出现。
 
-**并行跑法检查清单（V4 新增，逐条核对）：**
+**并行跑法检查清单（V4.1 新增，逐条核对）：**
 - [ ] 每个分支 worktree 已 `git worktree add`（用完整路径，别用 `.orchestration/wt-*` 这类让 run_agent 继续嵌套的路径）
-- [ ] 每个分支 `run_agent.sh` 都带 `--sandbox-root <wt>/<实际源码根>`（不要只传 worktree 根）
-- [ ] 每份任务卡里的目标文件路径，相对 `--sandbox-root` 正确（例如 `c-fi-hlj-ljkf-be/...`）
-- [ ] 日志能查到 `sandbox-root: <路径>`（前台打印），确认可写区对准源码树
+- [ ] 每个分支 `run_agent.sh` 都带 `--add-dir <wt>/<实际源码根>`（不要只传 worktree 根）
+- [ ] 每份任务卡里的目标文件路径，相对 `--add-dir` 正确（例如 `c-fi-hlj-ljkf-be/...`）
+- [ ] 日志能查到 `add-dir: <路径>`（前台打印），确认可写区对准源码树
 - [ ] 分支完成后该 worktree 的 `git status --short` 显示预期变更（而非空），才说明真正落盘
 
 **codex 完成后 Claude 立即做一次轻量检查（不是最终验收）：**

@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
 # run_agent.sh — 启动 codex/opencode，前台阻塞或后台 `--background` 模式
-# 用法: scripts/run_agent.sh <agent> <project_dir> "<prompt或任务卡路径>" [--background] [--sandbox-root <dir>]
+# 用法: scripts/run_agent.sh <agent> <project_dir> "<prompt或任务卡路径>" [--background] [--add-dir <dir>]
 #   agent: codex | opencode
 #   --background: 后台启动，写日志到 <project_dir>/.orchestration/logs/<agent>.log，立即返回 PID
 #   默认(无 --background)：前台阻塞，等待 agent 跑完返回 exit code（适合脚本联调用）
-#   --sandbox-root <dir>: 【可选】给 codex 指定"可写沙箱根目录"。默认 = <project_dir>。
-#       用于【并行 git worktree】场景：worktree 的真实源码树在 <worktree>/c-fi-hlj-ljkf-be/...，
-#       而沙箱可写根若只绑定到 <worktree> 根的嵌套子目录会导致"退出但无处可写"。
-#       此时应传 --sandbox-root <worktree 内实际源码树根>（例如 /path/wt-1/c-fi-hlj-ljkf-be），
-#       显式把可写区对准源码树，避免 codex 只能写在 cwd 嵌套目录、真实文件落盘失败。
+#   --add-dir <dir>: 【可选】给 codex 追加一个"可写目录"（映射 codex exec 的 --add-dir）。默认 = <project_dir>。
+#       用于【并行 git worktree】场景：-C 设 working root，--add-dir 追加 worktree 内"真实源码树根"
+#       （例如 /path/wt-1/c-fi-hlj-ljkf-be），使 `workspace-write` 可写区同时覆盖 codex 要改的源码路径，
+#       避免只能写在 cwd 而源码树 `Access denied` 导致"退出但无产出"。
+#       codex exec 的 --add-dir 说明：Additional directories that should be writable alongside the primary workspace.
 # 启动前先确保该 agent 已安装（缺失则自动 npm 安装，见 ensure_deps.sh）
 
 set -uo pipefail
 
-AGENT="${1:?用法: run_agent.sh <agent> <project_dir> <prompt> [--background] [--sandbox-root <dir>]}"
+AGENT="${1:?用法: run_agent.sh <agent> <project_dir> <prompt> [--background] [--add-dir <dir>]}"
 PROJECT_DIR="${2:?缺 project_dir}"
 PROMPT="${3:?缺 prompt}"
 MODE="foreground"
 SANDBOX_ROOT=""
-# 解析可选参数：--background / --sandbox-root <dir>（可任意顺序）
+# 解析可选参数：--background / --add-dir <dir>（可任意顺序）
 shift 3
 while [ $# -gt 0 ]; do
   case "$1" in
     --background) MODE="background"; shift ;;
-    --sandbox-root) SANDBOX_ROOT="${2:?--sandbox-root 需要 <dir>}"; shift 2 ;;
+    --add-dir) SANDBOX_ROOT="${2:?--add-dir 需要 <dir>}"; shift 2 ;;
     *) echo "❌ 未知参数: $1"; exit 9 ;;
   esac
 done
@@ -57,11 +57,13 @@ CLI_BIN="$(find_cli "$AGENT")"
 if [ -z "$CLI_BIN" ]; then echo "❌ 找不到 $AGENT，跳过。"; exit 2; fi
 
 case "$AGENT" in
-  # --sandbox-root 把 codex 的"可写区"对准真实源码树根；配合 -C（cwd）让 codex 的
-  # 相对路径写入（c-fi-hlj-ljkf-be/...）落到可写区内，避免（并行 worktree 时）只能写在
-  # cwd 的嵌套目录里、真实文件 `Access denied` 导致"退出但无产出"。
-  # 注意：dummy 占位 `--` 后拼接，避免 codex 把 --sandbox-root 当自身参数理解错位。
-  codex)    CMD=("$CLI_BIN" -C "$PROJECT_DIR_CANON" exec --sandbox workspace-write --skip-git-repo-check -m gpt-5-codex "$PROMPT" -- --sandbox-root "$SANDBOX_ROOT") ;;
+  # codex 的"可写区" = workspace-write 沙箱，默认只覆盖 -C 指定目录。
+  # 用法（关键）：
+  #   -C "$PROJECT_DIR_CANON"   → working root（沙箱主可写区）
+  #   --add-dir "$SANDBOX_ROOT" → 把"真实源码树根"加进可写区
+  # 并行 git worktree 时，PROJECT_DIR 传 worktree 根，--add-dir 传 worktree 内实际源码根（如 <wt>/c-fi-hlj-ljkf-be），
+  # 使 codex 按相对源码根路径写入的目标落在可写区内，避免只能写在 cwd 而源码树 `Access denied` 导致"退出但无产出"。
+  codex)    CMD=("$CLI_BIN" -C "$PROJECT_DIR_CANON" exec --sandbox workspace-write --skip-git-repo-check -m gpt-5-codex --add-dir "$SANDBOX_ROOT" "$PROMPT") ;;
   opencode) CMD=("$CLI_BIN" run --dir "$PROJECT_DIR_CANON" --auto "$PROMPT") ;;
   *) echo "❌ 未知 agent: $AGENT"; exit 3 ;;
 esac
@@ -78,7 +80,7 @@ if [ "$MODE" = "background" ]; then
   exit 0
 fi
 
-echo "▶️ 启动 $AGENT ... (sandbox-root: $SANDBOX_ROOT)"
+echo "▶️ 启动 $AGENT ... (add-dir: $SANDBOX_ROOT)"
 "${CMD[@]}"
 EXIT_CODE=$?
 echo ""
