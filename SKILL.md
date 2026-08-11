@@ -5,9 +5,9 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 
 # Quad Collaboration — 多智能体分工流水线
 
-**版本 v4.1**：v4 修复并行 worktree「codex 退出但无产出」；v4.1 将 run_agent.sh 的可写区参数规范为 `--add-dir <dir>`（映射 codex exec 的 `--add-dir`，追加真实源码树根至可写区）。
+**版本 v5.0**：v4 修复并行 worktree「codex 退出但无产出」；v4.1 将 run_agent.sh 的可写区参数规范为 `--add-dir`；**v5 新增「源码根自动对准」**——新增 `probe_src_roots.sh` 自动探查 backend/frontend/scripts/other 各类型源码根，run_agent.sh 据此把相关根自动注入 codex 可写区（`--add-dir`），不再依赖人为记忆传对目录，主目录/并行 worktree/顺序模式一律生效（详见「阶段 2 并行 worktree 的正确跑法」）。
 
-> ⚠️ **并行 worktree 必读（已踩坑，v4 强制）**：`run_agent.sh` 对 codex 使用 `--sandbox workspace-write`，**可写区默认只绑定到传入的 `project_dir`**。若把 worktree 根当 project_dir 直接传入（本应指向 worktree 内真实源码 `c-fi-hlj-ljkf-be/...`），codex 的 cwd 会落在 worktree 的 `/.orchestration/wt-*` 嵌套目录，**真实源码树在可写区外 → 全部 `Access denied` → codex 实现了任务却无处落盘（"退出但无产出"）**。正确跑法见下方「阶段 2 codex 实现」的并行分支与 run_agent 用法。
+> ⚠️ **并行 worktree 必读（v4 踩坑 + v5 根治）**：`run_agent.sh` 对 codex 使用 `--sandbox workspace-write`，其可写区由 `probe_src_roots.sh` 自动注入（默认后端 `backend`）。请勿再手写 `--add-dir`，否则覆盖自动对准逻辑。
 
 将 **Claude Code**（我）、**codex**、**opencode** 组成一条严格分工流水线：默认**顺序**，遇独立子任务自动切**并行**；配合**冲突解决 agent** 处理并行合并冲突。每次任务按固定阶段执行，不得跳过、不得私自替代。
 
@@ -38,7 +38,8 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 | 脚本 | 作用 |
 |------|------|
 | `ensure_deps.sh` | 【新增】检查 codex/opencode/node/npm/git，缺失自动 npm 安装 |
-| `run_agent.sh` | 启动 codex/opencode 前自动 ensure_deps，支持 `--background` 后台+日志/前台阻塞，等完成收集 exit code |
+| `probe_src_roots.sh` | 【v5】自动探查并分类各"源码根"（backend=含pom.xml / frontend=含package.json / backend-gradle / backend-dotnet / scripts / other=含src），输出 `类型:绝对路径`，不硬编码路径。供 run_agent.sh 把相关根注入 codex 可写区 |
+| `run_agent.sh` | 启动 codex/opencode 前自动 ensure_deps，支持 `--background` 后台+日志/前台阻塞，等完成收集 exit code；启动 codex 时按 `--add-root <type>` 或默认(backend)/`EXPLICIT_ADD_ROOTS=1`(all) 自动把探查出的源码根注入 `--add-dir` |
 | `validate_contract.sh` (+`.cjs`) | 校验 `contract.json`：文件存在性 + 接口签名一致（`call`必须含/`absent`必须无）+ 强制非空的验收标准(可机器执行 test_cmd/file_exists/contains) + 契约版本过期检测。exit0 契约一致，exit1 有偏差，exit2 JSON 损坏 |
 | `state.sh` | 读写 `.orchestration/state.json`：`set/get <扁平键> <值>`、`files-hash <文件>`（sha256）、`status`。用于进度恢复 + 防陈旧读取 |
 | `feedback_loop.sh` | 【新增】检查 agent 的 `feedback.md`，裁决阻塞归属，带熔断(默认3轮)防死循环：`check`/`consume`/`reset` |
@@ -181,27 +182,37 @@ cd <project-dir> && scripts/run_agent.sh codex . "$(cat .orchestration/codex_tas
 >
 > **统一建议**：脚本联调/验收用**前台**（阻塞拿 exit code 最稳）；人工跟进度用**后台 + tail**。两者行为一致，只是是否阻塞。
 
-#### 并行 worktree 的正确跑法（v4，防"退出但无产出"）
+#### 并行 worktree 的正确跑法（v4，防"退出但无产出"）＋【源码根自动对准】
 
-并行时每个分支在独立 git worktree 中实现。**关键：`--add-dir` 必须指向该 worktree 内"真实源码树根"**（codex 要改的代码所在，如 `<wt>/c-fi-hlj-ljkf-be`），而不是 worktree 根或 `.orchestration` 嵌套目录。这样 `workspace-write` 可写区才覆盖 codex 按 `c-fi-hlj-ljkf-be/...` 相对路径写入的目标。
+并行时每个分支在独立 git worktree 中实现。**所有源码根（后端/前端/其他）由脚本自动探查并加入 codex 可写区**，不再依赖人为传对 `--add-dir`：
 
-> 若只传 worktree 根而不指定 `--add-dir`，codex 的 cwd 会落到 worktree 的 `.orchestration/wt-*` 嵌套目录，源码树在可写区外 → `Access denied` → 实现成功但文件无法落盘（本次 v3 踩坑：4 个 codex 全部"退出但无产出"）。**必须显式追加源码树根。**
+- `scripts/probe_src_roots.sh <search_root>` —— 自动探查 `search_root`（通常为 worktree 根或仓库根）下各类型源码根，按 `pom.xml`(backend)/`package.json`(frontend)/`build.gradle`(backend-gradle)/`*.csproj|*.sln`(backend-dotnet)/`scripts/*.sh|sql|py`(scripts)/含`src`(other) 分类，输出 `类型:绝对路径`（每行一个）。不硬编码路径。
+- `run_agent.sh` 接收该探查结果，**可写区解析优先级**：
+  1. 显式 `--add-dir <dir>` → 用用户给的，不自动探查（尊重显式意图）；
+  2. 显式 `--add-root <type>` → 自动探查，仅把该类型根加入可写区（并行时 codex 往往只改某一类）；
+  3. 环境变量 `EXPLICIT_ADD_ROOTS=1` → 自动探查，所有类型根全加入（整仓前后端一起改）；
+  4. **默认** → 自动探查，仅把**后端(backend)源码根**加入（后端 Java 是多数 quad 任务目标，最安全）。
+  - 无论哪种，`-C` 主目录（worktree/仓库根）始终可写，且首个可写根集合自动传入多个 `--add-dir`。
+  - 启动日志打印 `add-dir: <真实路径>`，一眼核对。
+
+**Claude 侧统一约定（写进本 SKILL，不依赖 CLAUDE.md）**：所有 `run_agent.sh codex` 启动**不要手动指定 --add-dir**（交给自动探查）；仅在"只改前端"时加 `--add-root frontend`、"整仓一起改"时加 `--add-root all`。并行 worktree 与顺序模式同样适用。
 
 ```bash
 # 1) 创建 worktree（在项目根）
 git worktree add <wt-1>   # 例如 .worktrees/feat-a
-# 2) 后台启动该分支的 codex，--add-dir 追加到 worktree 内的源码树根
-cd <project-dir> && scripts/run_agent.sh codex <wt-1> "$(cat .orchestration/codex_task_feat_a.md)" --background --add-dir <wt-1>/c-fi-hlj-ljkf-be
+# 2) 后台启动该分支的 codex —— 源码根自动对准（默认后端；只改前端加 --add-root frontend）
+cd <project-dir> && scripts/run_agent.sh codex <wt-1> "$(cat .orchestration/codex_task_feat_a.md)" --background --add-root backend
 ```
 
-> 若每个 worktree 内源码根模块名不同（如 `c-fi-hlj-ljkf-be`、`other-src`），`--add-dir` 按各自实际目录传。`--background` 与 `--add-dir` 可任意顺序出现。
+> `--add-root`（与 `--background`）可任意顺序出现；`--add-root backend|frontend|all` 让脚本只把对应类型源码根注入可写区。不需要手写 `--add-dir`。
 
-**并行跑法检查清单（V4.1 新增，逐条核对）：**
+**并行跑法检查清单（V5 新增，逐条核对）：**
 - [ ] 每个分支 worktree 已 `git worktree add`（用完整路径，别用 `.orchestration/wt-*` 这类让 run_agent 继续嵌套的路径）
-- [ ] 每个分支 `run_agent.sh` 都带 `--add-dir <wt>/<实际源码根>`（不要只传 worktree 根）
-- [ ] 每份任务卡里的目标文件路径，相对 `--add-dir` 正确（例如 `c-fi-hlj-ljkf-be/...`）
-- [ ] 日志能查到 `add-dir: <路径>`（前台打印），确认可写区对准源码树
+- [ ] 每个分支 `run_agent.sh` 用 `--add-root <type>` 或默认(后端)；**不要手写 `--add-dir`**（源码根由 `probe_src_roots.sh` 自动探查注入）
+- [ ] 每份任务卡里的目标文件路径，相对项目源码根（如 `c-fi-hlj-ljkf-be/...`）正确
+- [ ] 日志能查到 `add-dir: <真实源码根>`（前台/后台均打印），确认可写区对准源码树
 - [ ] 分支完成后该 worktree 的 `git status --short` 显示预期变更（而非空），才说明真正落盘
+- [ ] 若某节点 `probe_src_roots.sh` 未探到该类型根（回退到 project_dir），需确认任务卡路径与可写根是否一致
 
 **codex 完成后 Claude 立即做一次轻量检查（不是最终验收）：**
 - **先处理反馈（全新环节，必须在跑契约前）：**

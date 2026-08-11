@@ -13,25 +13,128 @@
 
 set -uo pipefail
 
-AGENT="${1:?用法: run_agent.sh <agent> <project_dir> <prompt> [--background] [--add-dir <dir>]}"
+AGENT="${1:?用法: run_agent.sh <agent> <project_dir> <prompt> [--background] [--add-dir <dir>] [--add-root <type>]}"
 PROJECT_DIR="${2:?缺 project_dir}"
 PROMPT="${3:?缺 prompt}"
 MODE="foreground"
 SANDBOX_ROOT=""
-# 解析可选参数：--background / --add-dir <dir>（可任意顺序）
+ADD_ROOT=""
+# 解析可选参数：--background / --add-dir <dir> / --add-root <type>（可任意顺序）
 shift 3
 while [ $# -gt 0 ]; do
   case "$1" in
     --background) MODE="background"; shift ;;
     --add-dir) SANDBOX_ROOT="${2:?--add-dir 需要 <dir>}"; shift 2 ;;
+    --add-root) ADD_ROOT="${2:?--add-root 需要 <type>}"; shift 2 ;;
     *) echo "❌ 未知参数: $1"; exit 9 ;;
   esac
 done
-# 默认沙箱根 = project_dir
-SANDBOX_ROOT="${SANDBOX_ROOT:-$PROJECT_DIR}"
-# 归一化（去掉尾部斜杠、解析 . / ..），确保 -C 与沙箱根不因路径写法不同而失配
-SANDBOX_ROOT="$(cd "$SANDBOX_ROOT" && pwd)"
+
+_THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR_CANON="$(cd "$PROJECT_DIR" && pwd)"
+
+# =====================================================================
+# 自动源码根对准 —— 根治"实现了却无处落盘"（quad 并行 worktree 历史大坑）
+#
+# 背景：codex 的 workspace-write 可写区默认只绑到 project_dir（或绑错的 --add-dir），
+#   真实源码树在可写区外 → codex 能执行却写不进源码（Access denied →"退出但无产出"）。
+# 方案：启动前确定项目的"各类型源码根"，把相关根全加进可写区（--add-dir），不硬编码、不靠人记。
+#
+# 源码根来源（file-first）：
+#   优先读 <project>/.orchestration/source_roots.json（人工可改，文件不存在才自动探查）：
+#     { "backend":[...], "frontend":[...], "other":[...] }  绝对路径数组
+#   文件不存在时调用 scripts/probe_src_roots.sh 自动探查，并把结果**写回**该文件
+#   （下次直接读文件，人工改一次即可覆盖，永久生效）。
+#
+# 可写根解析优先级：
+#   1) --add-dir <dir>：用户显式给根 → 直接用，不读文件、不探查（尊重显式意图）。
+#   2) --add-root <type>：从 source_roots.json(或探查)取该类型根加入可写区。
+#   3) ENV EXPLICIT_ADD_ROOTS=1：取全部类型(backend/frontend/other)根加入。
+#   4) 默认：仅后端源码根(backend)（后端 Java 是多数 quad 目标，最安全）。
+#  类型判定见 scripts/probe_src_roots.sh（pom.xml/package.json/build.gradle/csproj/src 自动分类）
+# =====================================================================
+ORCH_DIR="$PROJECT_DIR_CANON/.orchestration"
+SRC_ROOTS_FILE="$ORCH_DIR/source_roots.json"
+
+# —— 决策：需要读源码根集合吗？——
+NEED_ROOTS=0
+TARGET_TYPE=""
+if [ -z "$SANDBOX_ROOT" ]; then
+  NEED_ROOTS=1
+  if [ -n "$ADD_ROOT" ]; then
+    TARGET_TYPE="$ADD_ROOT"
+    # EXPLICIT_ADD_ROOTS=1 或 ADD_ROOT=all → 全类型；否则用用户指定的类型
+    if [ "${EXPLICIT_ADD_ROOTS:-0}" = "1" ] || [ "$ADD_ROOT" = "all" ]; then
+      TARGET_TYPE="all"
+    fi
+  elif [ "${EXPLICIT_ADD_ROOTS:-0}" = "1" ]; then
+    TARGET_TYPE="all"
+  else
+    TARGET_TYPE="backend"
+  fi
+fi
+
+# —— 读取/生成源码根集合 ——
+# 返回值：ROOTS_BY_TYPE 是 declare -A 关联数组，键为 backend/frontend/other，值为空格分隔的绝对路径
+declare -A ROOTS_BY_TYPE=()
+USING_FILE=0
+if [ "$NEED_ROOTS" = "1" ] && [ -f "$SRC_ROOTS_FILE" ]; then
+  if command -v node >/dev/null 2>&1; then
+    # 用 node 解析（剥离 // 注释后 JSON.parse；文件含中文注释也可解析）
+    J_FILE="$SRC_ROOTS_FILE"
+    parsed="$(J_FILE="$J_FILE" node -e 'const fs=require("fs");
+      let raw;try{raw=fs.readFileSync(process.env.J_FILE,"utf8")}catch(e){process.exit(0)}
+      // 去注释：逐行剥离 // 注释，保留引号内 // （简单处理，够用）
+      let clean="";
+      const lines=raw.split(/\r?\n/);
+      for(const ln of lines){ let s=ln; const ci=s.indexOf("//"); if(ci>=0)s=s.slice(0,ci); clean+=s+"\n"; }
+      let f;try{f=JSON.parse(clean)}catch(e){process.exit(0)}
+      for(const t of["backend","frontend","other"])(Array.isArray(f[t])?f[t]:[]).forEach(p=>console.log(t+":"+p));' 2>/dev/null)"
+    if [ -n "$parsed" ]; then
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        type="${line%%:*}"; path="${line#*:}"
+        case "$type" in backend|frontend|other) ROOTS_BY_TYPE["$type"]="${ROOTS_BY_TYPE[$type]:-} $path" ;; esac
+      done <<< "$parsed"
+      USING_FILE=1
+    fi
+  fi
+  [ "$USING_FILE" = "1" ] && echo "📂 读到源码根文件: $SRC_ROOTS_FILE（可人工编辑覆盖）" >&2
+fi
+
+# 解析失败或文件不存在 → 自动探查 + 写回文件
+if [ "$USING_FILE" = "0" ]; then
+  if [ -f "$SRC_ROOTS_FILE" ]; then
+    echo "⚠️  source_roots.json 存在但解析失败，转自动探查覆盖..." >&2
+  fi
+  mkdir -p "$ORCH_DIR"
+  PROBED="$("$_THIS_DIR/probe_src_roots.sh" "$PROJECT_DIR_CANON" 2>/dev/null)"
+  PROBED="$PROBED" PJROOT="$PROJECT_DIR_CANON" SRC_FILE="$SRC_ROOTS_FILE" node "$_THIS_DIR/write_source_roots.cjs" 2>/dev/null
+  # 从探查结果填充 ROOTS_BY_TYPE
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    type="${line%%:*}"; path="${line#*:}"
+    case "$type" in backend|frontend|other) ROOTS_BY_TYPE["$type"]="${ROOTS_BY_TYPE[$type]:-} $path" ;; esac
+  done <<< "$PROBED"
+fi
+
+# —— 按 TARGET_TYPE 组装 ADD_DIRS ——
+# （NEED_ROOTS=1 才有可写根集合；否则走 --add-dir 显式分支）
+if [ "$NEED_ROOTS" = "1" ]; then
+  ADD_DIRS=()
+  for t in backend frontend other; do
+    [ "$TARGET_TYPE" != "all" ] && [ "$t" != "$TARGET_TYPE" ] && continue
+    for r in ${ROOTS_BY_TYPE[$t]:-}; do
+      rp="$(cd "$r" 2>/dev/null && pwd)" && [ -n "$rp" ] && ADD_DIRS+=("$rp")
+    done
+  done
+  [ ${#ADD_DIRS[@]} -eq 0 ] && ADD_DIRS=("$PROJECT_DIR_CANON")
+else
+  # 显式 --add-dir：直接用
+  SANDBOX_ROOT="$(cd "$SANDBOX_ROOT" && pwd)"
+  ADD_DIRS=("$SANDBOX_ROOT")
+fi
+SANDBOX_ROOT="${ADD_DIRS[0]}"
 
 # 确保外部依赖（agent 未装会自动安装）
 _THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,10 +163,14 @@ case "$AGENT" in
   # codex 的"可写区" = workspace-write 沙箱，默认只覆盖 -C 指定目录。
   # 用法（关键）：
   #   -C "$PROJECT_DIR_CANON"   → working root（沙箱主可写区）
-  #   --add-dir "$SANDBOX_ROOT" → 把"真实源码树根"加进可写区
-  # 并行 git worktree 时，PROJECT_DIR 传 worktree 根，--add-dir 传 worktree 内实际源码根（如 <wt>/c-fi-hlj-ljkf-be），
-  # 使 codex 按相对源码根路径写入的目标落在可写区内，避免只能写在 cwd 而源码树 `Access denied` 导致"退出但无产出"。
-  codex)    CMD=("$CLI_BIN" -C "$PROJECT_DIR_CANON" exec --sandbox workspace-write --skip-git-repo-check -m gpt-5-codex --add-dir "$SANDBOX_ROOT" "$PROMPT") ;;
+  #   --add-dir …               → 把"真实源码树根"加进可写区（可多个，逐个 --add-dir）
+  # 并行 git worktree 时，PROJECT_DIR 传 worktree 根，自动探查会把 worktree 内后端/前端源码根加进来，
+  # 使 codex 按相对源码根路径写入的目标落在可写区内，避免只能写在 cwd 而源码树 `Access denied`。
+  codex)
+    CMD=("$CLI_BIN" -C "$PROJECT_DIR_CANON" exec --sandbox workspace-write --skip-git-repo-check -m gpt-5-codex)
+    for ad in "${ADD_DIRS[@]}"; do CMD+=("--add-dir" "$ad"); done
+    CMD+=("$PROMPT")
+    ;;
   opencode) CMD=("$CLI_BIN" run --dir "$PROJECT_DIR_CANON" --auto "$PROMPT") ;;
   *) echo "❌ 未知 agent: $AGENT"; exit 3 ;;
 esac
@@ -80,7 +187,7 @@ if [ "$MODE" = "background" ]; then
   exit 0
 fi
 
-echo "▶️ 启动 $AGENT ... (add-dir: $SANDBOX_ROOT)"
+echo "▶️ 启动 $AGENT ... (add-dir: ${ADD_DIRS[*]})"
 "${CMD[@]}"
 EXIT_CODE=$?
 echo ""
