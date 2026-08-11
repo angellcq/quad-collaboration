@@ -1,6 +1,6 @@
 # Quad Collaboration — 设计原理
 
-**版本 v4**（在 v3 机器契约校验 + 状态机基础上，新增：**反馈通道 + 熔断防死循环**——agent 遇阻塞能上报，不再"哑巴硬扛"，且不会无限循环）
+**版本 v5**（在 v4 反馈通道基础上，新增：**源码根自动对准**——`probe_src_roots.sh` 自动探查各类型源码根并写入 `source_roots.json`，`run_agent.sh` 据此把相关根自动注入 codex 可写区，根治并行 worktree"实现了却无处落盘"的历史大坑）
 
 本文件说明 `quad-collaboration` 技能在**协调架构、通信机制、知识共享、异常协同**四个维度的设计思路。这是"为什么这么设计"，`SKILL.md` 是"怎么执行"。
 
@@ -114,6 +114,38 @@ Claude 读所有产出 → 验收（汇聚全部知识）
   - 验收时检查双方谁越权改了谁的文件（已实战验证有效）
 - **接口先钉死**：任务卡里提前写明接口签名/数据格式，让 Codex 与 OpenCode 照同一契约工作，从源头减少知识分歧。**v3 把它升级成 `contract.json` 机器契约 + `validate_contract.sh` 自动校验**——不再依赖 agent 自觉，跨进程交接即用 exit code 判定"契约是否一致"。契约是唯一真相：代码跟契约走，不是契约跟代码走。
 
+### 源码根自动对准（v5）—— 给 codex "找对落盘位置"
+
+**问题**：codex 的 `workspace-write` 沙箱可写区默认只覆盖传入的 `project_dir`。并行 git worktree 场景下若把 worktree 根当 project_dir，真实源码树在可写区外 → codex 能执行却写不进源码（`Access denied` →"退出但无产出"），曾多次踩坑。
+
+**方案**：不靠人记忆传对 `--add-dir`，而是**自动探查 + 文件固化**：
+
+```
+probe_src_roots.sh <search_root>   → 自动探查各"编码单元"根，按类型分类
+   backend  : 含 pom.xml / build.gradle / *.java 显著
+   frontend : 含 package.json + src 或 *.vue/*.jsx/*.tsx 显著
+   other    : 有工程入口或含 src/ 但非前后端（宁多勿错，一律加入可写区）
+   → 输出 "类型:绝对路径"（一行一个），不硬编码路径、不绑死某项目
+        │
+        ▼
+write_source_roots.cjs  → 写成 <project>/.orchestration/source_roots.json
+   （带中文注释的可编辑 JSON，人工可改一次永久生效；标准 JSON 解析器读它失败属预期，
+     读取端已支持剥离 // 注释解析）
+        │
+        ▼
+run_agent.sh（file-first）→ 优先读 source_roots.json；文件不存在才再探查并写回
+   · 默认仅后端(backend)根加入可写区（多数研发任务目标）
+   · --add-root <type> 只加某类型（并行时 codex 往往只改某一类）
+   · EXPLICIT_ADD_ROOTS=1 / --add-root all 全部类型
+   · 显式 --add-dir <dir> 则用用户给的，不自动探查（尊重显式意图）
+   · -C 主目录始终可写；可写根可多个，逐个 --add-dir；日志打印 add-dir 一眼核对
+```
+
+**设计要点**：
+- **判定基于客观信号**（工程/清单文件 + 源码目录 + 源文件扩展名），不依赖项目目录名 → 任何语言/仓库通用。
+- **文件固化 + 人工可改**：探查结果落 `source_roots.json`，脚本每次优先读它——既是缓存（免重复探查），也给人一个"发现不对就手动改"的覆盖入口。
+- **归类宁多勿错**：拿不准一律 `other`（仍加入可写区），只影响 `--add-root` 的过滤粒度，不影响能否落盘。
+
 ---
 
 ## 4. 异常协同（Exception Handling）
@@ -148,6 +180,7 @@ Claude 读所有产出 → 验收（汇聚全部知识）
 | v2 | + 复杂时自动切并行（git worktree 隔离）；+ 冲突解决 agent；+ 四维度设计说明（本文） |
 | v3 | **通信可靠性增强**：+ `contract.json` 机器契约（接口/文件/数据格式/验收条件）+ `validate_contract.sh` 每次交接自动校验 + `state.json` 状态机 + 产物 hash（防陈旧） |
 | v4 | **上行反馈通道**：+ `feedback.md` + `feedback_loop.sh`（`check`/`consume`/`reset`）——agent 遇阻塞写文件、Claude 完成后轮询接管，带熔断(默认3轮)防死循环；解决并行定义歧义；run_agent 前后台模式；验收归属客观判定 |
+| v5 | **源码根自动对准**：+ `probe_src_roots.sh`（通用探查 backend/frontend/other 三类源码根，多语言清单，不硬编码路径）+ `write_source_roots.cjs`（生成带中文注释的 `source_roots.json`）+ `run_agent.sh` 改 file-first（优先读 `source_roots.json`、剥离 `//` 注释解析，文件缺失才探查并写回）、新增 `--add-root <type>` / `EXPLICIT_ADD_ROOTS=1`(all) 可写区注入、多根逐个 `--add-dir`。根治并行 worktree「实现了却无处落盘」的历史大坑 |
 
 ---
 
