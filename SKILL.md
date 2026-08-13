@@ -5,13 +5,20 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 
 # Quad Collaboration — 多智能体分工流水线
 
-**版本 v5.0**：v4 修复并行 worktree「codex 退出但无产出」；v4.1 将 run_agent.sh 的可写区参数规范为 `--add-dir`；**v5 新增「源码根自动对准」**——新增 `probe_src_roots.sh` 自动探查 backend/frontend/scripts/other 各类型源码根，run_agent.sh 据此把相关根自动注入 codex 可写区（`--add-dir`），不再依赖人为记忆传对目录，主目录/并行 worktree/顺序模式一律生效（详见「阶段 2 并行 worktree 的正确跑法」）。
+**版本 v5.3**：v4 修复并行 worktree「codex 退出但无产出」；v4.1 将 run_agent.sh 的可写区参数规范为 `--add-dir`；v5 新增「源码根自动对准」——新增 `probe_src_roots.sh` 自动探查 backend/frontend/scripts/other 各类型源码根；**v5.2 新增契约弹性 + Windows写文件策略 + 自测责任分工**（基于 2026-08-12/13 本地工程复盘）；**v5.3 修复7 处逻辑冲突与设计缺陷**：
+- 删除阶段2后重复契约校验（仅留阶段3后唯一一次闸门）
+- `interfaces[]` 简化为 absent-only（避免与 `acceptance` 双轨）
+- `subjective` 由默认改为可选
+- 触发条件扩列（含"使用 quad 技能"等口语化等同表达）
+- 契约版本升级条件明确化（接口增删必升、AC 文本调整不升）
+- 术语规范：熔断 / 回退轮次 / AC 记录三分
+- 删去对 README.md 的外链引用（与项目 CLAUDE.md「禁止通用 brainstorming」约束对齐）
 
 > ⚠️ **并行 worktree 必读（v4 踩坑 + v5 根治）**：`run_agent.sh` 对 codex 使用 `--sandbox workspace-write`，其可写区由 `probe_src_roots.sh` 自动注入（默认后端 `backend`）。请勿再手写 `--add-dir`，否则覆盖自动对准逻辑。
 
 将 **Claude Code**（我）、**codex**、**opencode** 组成一条严格分工流水线：默认**顺序**，遇独立子任务自动切**并行**；配合**冲突解决 agent** 处理并行合并冲突。每次任务按固定阶段执行，不得跳过、不得私自替代。
 
-> **设计原理（协调架构/通信机制/知识共享/异常协同四维度）见 `README.md`。** 本文件是执行手册，README 是设计说明书。
+> 本文件是 quad 协作技能的完整执行手册（启动条件 / 阶段流程 / 反馈处理 / 冲突解决 / 注意事项）。**不再外链任何设计原理 / brainstorming 文档**——按你项目的 CLAUDE.md「禁止通用 brainstorming」约束，本技能执行时**只读 SKILL.md**，不读 README、README.md 等任何外链文档。所有跨文件知识已沉淀在本文件内。
 
 ## 外部依赖与自动安装
 
@@ -55,10 +62,21 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 ## 触发条件
 
 用户输入以下任一句即激活此技能：
-- `/quad <需求描述>`
-- "用多智能体"
-- "codex opencode 一起干"
-- "三智能体协作"
+
+- **精确触发**（高置信度）：
+  - `/quad <需求描述>`
+  - "用多智能体"
+  - "codex opencode 一起干"
+  - "三智能体协作"
+- **等同触发**（口语化、软匹配）：
+  - "使用 quad 技能"
+  - "用 quad"
+  - "走 quad 流水线"
+  - "上 codex + opencode"
+  - "让 codex 实现 + opencode 测一下"
+  - 用户显式提及 `codex` + `opencode` 协同
+
+> 命中策略：精确触发直入；等同触发需询问「是否走 quad 流水线？」一次确认（避免误判）。若用户已说明「实施」「开工」「跑一下」等动作词，可**跳过询问直接启动**。
 
 ## 运行模式：顺序（默认） vs 并行
 
@@ -121,7 +139,6 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
     { "path": "README.md" }
   ],
   "interfaces": [
-    { "source": "src/history.js", "symbol": "historyExport", "kind": "call" },
     { "source": "src/history.js", "symbol": "deprecated_old", "kind": "absent" }
   ],
   "acceptance": [
@@ -135,9 +152,18 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 字段含义：
 - `meta.name` — 任务名称
 - `meta.version` — **契约版本号**（必填）。约定：首次 `v1`，接口变更时升为 `v2/v3/...`。`validate_contract.sh` 会读取此字段，与 `state.json` 的 `contract_version` 比对，不一致时**输出警告**，提醒可能读到了过期契约。
+- **契约版本升级条件**（v5.3 明确化）：
+  - **`v_{n+1}` 必升**：契约字段增/删、`files[]` 路径变更、`interfaces[]` 增删符号
+  - **`v_n` 内不变即可**：仅 `acceptance` 条目文本收紧/放宽（如本次 v5.3 改动 AC-03 由 `insert(bill)` 改为 `insert(`）
+  - 升版后须同步：`state.sh set contract_version v_{n+1}` + 在 `contract.json.meta.version` 同改
 - `files[].path` — 预期最终会存在的文件（校验时会逐条 `ls`）
-- `interfaces[]` — 接口签名断言：`source`=源码相对路径，`symbol`=函数/字段名，`kind`：`call`=源码必须含该符号；`absent`=源码不得含该符号
-- `acceptance` — **验收标准清单（Accept Criteria）**，编码方与验收方共用的同一把尺子。**每条必须带 `type`，机器在交接时当场执行：**
+- `interfaces[]` — **【v5.3 调整】仅记录「绝不能出现的旧符号」(absent)**：
+  - `source` = 源码相对路径
+  - `symbol` = 不能保留的旧函数/字段名
+  - `kind: absent`（仅此一种）= 源码不得含该符号
+  - **不记录「必须存在的符号」**：这类由 `acceptance[].type: contains` 覆盖，单一职责，避免双轨重复
+  - 用途：防止重构时漏删/误留旧符号（如弃用 API、旧字段）；assertion 由阶段2轻量门跑
+- `acceptance` — **唯一契约尺**：编码方与验收方共用的同一把尺子，所有「必须存在/必须正确」的断言都进这里。**每条必须带 `type`，机器在交接时当场执行：**
   - `test_cmd`：跑 `cmd`，退出码 0=过（把"必须过测试"变成 exit code）。**注意：Windows 下 `node --test <目录>` 会静默通过而不真正跑测试**，务必给**具体文件**（`node --test test/*.test.js`）或裸 glob，不要传目录。
   - `file_exists`：断言 `path` 文件存在
   - `contains`：断言 `file` 内容含 `text` — **写最小公共子串，预留 5-10% 弹性**：
@@ -146,7 +172,7 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
     - ❌ 反模式3：`text: "log.info(\"xxx\")"` —— 实现层若用 `log.error` 或拼写略改即不匹配
     - ✅ 推荐：`text: "billRepository.insert("` / `text: "foo.bar"` / `text: "logger.error("` —— 抓**类名.方法名(** 或 **表名** 或 **字段名**这类稳定子串
     - 当 AC 涉及 **Java/SQL/JSON 字面量**时，外层包装（List /括号 /字符串转义）极不可控，写子串避免误报
-  - `subjective`：无法自动判，留待阶段 4 人工核
+  - `subjective`：**可选类型**，仅当存在无法机器验证的 AC 才使用（如"页面刷新后历史记录仍可见"），本类型不参与阶段 3 的契约自动校验
   - 每条自动编号：写 `id` 优先，否则按 `AC-01/AC-02…` 补齐
 - **`acceptance` 必须非空**：为空时 `validate_contract.sh` 直接 exit 1，**卡住流水线，不得进入阶段 2**——你不写验收标准，工作流根本不启动。
 
@@ -252,11 +278,13 @@ cd <project-dir> && scripts/run_agent.sh codex <wt-1> "$(cat .orchestration/code
   scripts/state.sh <project> set codex_read_contract <契约版本>
   scripts/state.sh <project> set codex_out_hash "$(scripts/state.sh <project> files-hash <关键产物>)"
   ```
-- **跑契约校验（交接前的闸门，提前拦截理解偏差）**：
+- **【v5.3 调整】轻量门：仅校验 `interfaces[].kind: absent` 符号未被引入**（阶段2 后**不跑全量契约**，阶段3 后是唯一一次跑 validate_contract.sh 的闸门）：
   ```bash
-  scripts/validate_contract.sh <project>    # exit 0=契约一致；exit1=有偏差，记录后进阶段3
+  scripts/validate_contract.sh <project> --phase=2   # 只跑 absent 类断言；存在类断言留给阶段3
   ```
-  校验失败会明确报出"接口缺失/应删未删/文件缺失"，据此决定是继续（轻微偏差阶段4兜底）还是回阶段 2（接口大改）。
+  - 若 absent 失败 → 说明 codex 误删/新增了不该有的符号 → 回阶段 2 重写
+  - 若 absent 通过 → 正常进阶段 3，全量契约校验由阶段 3 后跑
+  - **为什么不现在跑全量契约**：阶段 3 跑才能对照「codex 实现 + opencode 测试」双产出，单靠 codex 产物可能 false negative
 - 若发现严重问题（如文件缺失/越权），记录后继续进入阶段 3（阶段 4 会拦截）
 
 ### 阶段 3：opencode 测试/文档
@@ -309,16 +337,17 @@ cd <project-dir> && node --test test/
 
 按 `contract.json` 的 `acceptance` **逐条对照同一个 AC 编号**打分，不是凭感觉：
 
-- **机器可验条目（`test_cmd`/`file_exists`/`contains`）**：已由 `validate_contract.sh` 在交接时自动跑过，阶段 4 复跑确认。
-- **`subjective` 条目**：这部分才需要手动验证，逐一执行并把结论**机器写回** `state.json`，形成可追溯记录：
+- **机器可验条目（`test_cmd`/`file_exists`/`contains`）**：由 `validate_contract.sh` 在阶段 3 后自动跑过，阶段 4 复跑确认。
+- **`subjective` 条目**（若契约有此类条目）：单独人工核验，逐一执行并把结论**机器写回** `state.json`：
   ```bash
-  scripts/state.sh <project> set ac_04 true    # AC-01 通过
+  scripts/state.sh <project> set ac_04 true    # AC-04 通过
   scripts/state.sh <project> set ac_04 false   # 或 false，表示该条未过
-  # 按每条 AC 编号分别记录
+  # 按每条 subjective AC 编号分别记录
   ```
   - 命令行工具：直接运行并检查输出
   - Web 界面：curl 或启动后检查响应
   - 库/模块：写一个小脚本 import 并调用
+- 若契约**无 subjective 项**（多数场景）：跳过本节，直接跑机器可验条目即可
 
 #### 4.3 写验收报告
 
@@ -357,13 +386,18 @@ cd <project-dir> && node --test test/
 若验收不通过，先用**客观规则**定归属，避免凭主观来回打回：
 
 1. **判定归属（客观判据）**：
-   - 先跑 `scripts/validate_contract.sh <project>` 看 `interfaces` 断言是否通过。
-   - **codex 实现不符合 `interfaces` 断言** → 问题在**实现**，回阶段 2。
-   - **codex 实现符合 `interfaces` 断言**，但测试失败 → 问题在**测试/文档**，回阶段 3。
+   - 先跑 `scripts/validate_contract.sh <project>` 看 `interfaces`/`acceptance` 断言是否通过。
+   - **`acceptance` 失败 + 实现缺陷** → 问题在**实现**，回阶段 2。
+   - **`acceptance` 通过 + opencode 测试失败** → 问题在**测试/文档**，回阶段 3。
    - **接口与测试都通过，仅 `subjective` 项不满足** → 需求偏差，Claude 修正任务卡/契约，回阶段 2。
 2. 判断后记录失败原因。
-3. 重试轮数：实现回退最多 2 轮，测试/文档回退最多 2 轮，**分开计数**（避免"先改测试再改实现"消耗同一份额度）。
+3. **回退轮次（实现 / 测试各自独立）**：实现回退 ≤ 2 轮，测试/文档回退 ≤ 2 轮，**分开计数**（避免"先改测试再改实现"消耗同一份额度）。
 4. 超过上限仍未通过 → 向用户报告阻塞原因，停止流水线。
+
+> **术语规范**（v5.3 统一）：
+> - **熔断** = `feedback_loops` 总闸，仅由反馈流程消耗，默认 3 次触顶升级用户（§反馈处理流程）
+> - **回退轮次** = 实现 2 轮 + 测试 2 轮，独立计数，互不挤占（本节）
+> - **AC 记录** = 验收阶段把每条 AC 结论写回 `state.json`（`ac_NN true/false`，§4.2）
 
 ## 反馈处理流程（防死循环）
 
@@ -435,4 +469,3 @@ Claude 执行：
 - **后台日志可随时 tail**：用户说"看进度"时，读任务后台输出文件直播
 - **流水线中途可中止**：用户说"停"即停止，记录当前状态
 - **并发冲突预防**：顺序模式按职责隔离文件；并行模式用 git worktree 隔离 + 冲突解决 agent 兜底
-- **完整设计原理**（协调架构/通信机制/知识共享/异常协同四维度）见技能目录下的 `README.md`
