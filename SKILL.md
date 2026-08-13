@@ -89,8 +89,13 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 ### 阶段 0：需求理解（Claude）
 
 1. 读取用户需求，明确：目标、约束、技术栈、输入/输出
-2. 判断是否适合流水线（过于简单的任务可由 Claude 直接完成，但要向用户说明跳过理由）
-3. 输出：一段话确认理解，等待用户确认（或自动继续，取决于用户偏好）
+2. **【API 签名前置勘察】** 若需求涉及调用第三方/平台接口，**先 grep 现有同类用法 2-3 处**确认真实签名：
+   - 例：调用 `billRepository.insert(单实体)` → 先 `grep -rn "billRepository.insert" <项目>/src/main/java/.../impl/` 看实际签名（往往 `IBillRepository` 只有 `List<T>` 重载）
+   - 例：调用 `gzwBatchReportUtil.sendSingleReport` → 找同类 caller 确认参数结构（request 字段命名、必填项）
+   - 例：HTTP 调用工具类 → 找现有实现确认请求/响应结构
+   - **目的**：把真实签名/参数写到任务卡里，避免 codex 现查现改浪费时间。代价：2-3 个 grep；收益：单文件改动任务省 5-10 分钟
+3. 判断是否适合流水线（过于简单的任务可由 Claude 直接完成，但要向用户说明跳过理由）
+4. 输出：一段话确认理解，等待用户确认（或自动继续，取决于用户偏好）
 
 ### 阶段 1：拆解分工（Claude）
 
@@ -135,7 +140,12 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 - `acceptance` — **验收标准清单（Accept Criteria）**，编码方与验收方共用的同一把尺子。**每条必须带 `type`，机器在交接时当场执行：**
   - `test_cmd`：跑 `cmd`，退出码 0=过（把"必须过测试"变成 exit code）。**注意：Windows 下 `node --test <目录>` 会静默通过而不真正跑测试**，务必给**具体文件**（`node --test test/*.test.js`）或裸 glob，不要传目录。
   - `file_exists`：断言 `path` 文件存在
-  - `contains`：断言 `file` 内容含 `text`
+  - `contains`：断言 `file` 内容含 `text` — **写最小公共子串，预留 5-10% 弹性**：
+    - ❌ 反模式1：`text: "billRepository.insert(bill)"` —— 实现层若选 `Collections.singletonList(bill)` 即不匹配
+    - ❌ 反模式2：`text: "DELETE FROM \"foo\".\"bar\""` —— Java 源内必然转义成 `\"foo\".\"bar\"`
+    - ❌ 反模式3：`text: "log.info(\"xxx\")"` —— 实现层若用 `log.error` 或拼写略改即不匹配
+    - ✅ 推荐：`text: "billRepository.insert("` / `text: "foo.bar"` / `text: "logger.error("` —— 抓**类名.方法名(** 或 **表名** 或 **字段名**这类稳定子串
+    - 当 AC 涉及 **Java/SQL/JSON 字面量**时，外层包装（List /括号 /字符串转义）极不可控，写子串避免误报
   - `subjective`：无法自动判，留待阶段 4 人工核
   - 每条自动编号：写 `id` 优先，否则按 `AC-01/AC-02…` 补齐
 - **`acceptance` 必须非空**：为空时 `validate_contract.sh` 直接 exit 1，**卡住流水线，不得进入阶段 2**——你不写验收标准，工作流根本不启动。
@@ -150,6 +160,14 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 - codex/opencode 常默认按 bash/Linux 生成命令（`cat << 'EOF'` heredoc、把整段补丁塞进 `apply_patch` 命令行参数）。若实际执行 shell 是 **Windows PowerShell**，这些命令会失败：heredoc 报 `Missing file specification after redirection operator`，apply_patch 塞参数报 `requires a UTF-8 PATCH argument`
 - **Claude 编排时判断当前 OS**：Windows（win32）→ 在**每份任务卡标题下**加 `## ⚠️ 运行环境提示（Windows / PowerShell）` 段，指明实际 shell 是 PowerShell、别用 bash heredoc、别用 apply_patch 塞参数、写文件用 `@'...'@ | Set-Content -Path <路径> -Encoding UTF8`；Linux/macOS → 不加
 - 为保持技能**跨 OS 通用**，**不要**把 Windows 提示硬编码进 `run_agent.sh` 等脚本——由编排者按当前 OS 注入任务卡（技能脚本保持平台无关）
+- **【改既有文件的推荐策略】**（Windows 下避免长时间兜圈的关键）：
+  - 不要用 `apply_patch` 整段补丁塞参数（PowerShell 会报 `requires a UTF-8 PATCH argument`）
+  - 不要 `Write-Output` 整段重写既有文件（易引入 CRLF / BOM / GBK 编码问题，javac 报「未结束的字符文字」）
+  - **正确做法**：定位旧锚点 → `Get-Content -Replace "<old>","<new>"` 一次替换一段 → `Set-Content -Encoding UTF8`，多次小步替换而非一次大改
+- **【自测责任分工】**（避免 codex 在 javac/mvn 上兜圈）：
+  - codex 的"自测"仅在**前端类**项目（`npm test` / `node --test`）有意义，后端 Maven 项目的 `mvn compile` / `javac` 由阶段 4 Claude 独立跑
+  - 后端 Maven 项目任务卡明文写**「编译验证由阶段 4 跑，codex 不要自行 javac/mvn」**，节省 5-10 分钟
+  - 实测：单文件后端改动任务，codex 在 javac 自测上平均耗时 10-15 分钟（编码仅 5 分钟），收益为负
 
 **每份任务卡末尾都必须附上【执行反馈】段（不改就丢了上报通道）：**
 ```
