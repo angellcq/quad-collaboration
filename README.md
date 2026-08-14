@@ -1,8 +1,10 @@
 # Quad Collaboration — 设计原理
 
-**版本 v5.1**（在 v5 源码根自动对准基础上，新增：**任务卡按运行 OS 动态注入「运行环境提示」**——预防 codex/opencode 在 Windows 下按 bash 习惯写文件失败，见「异常协同」④ 后的专项说明；不改脚本，脚本保持平台无关）
+**版本 v5.4**（在 v5.1 跨平台写文件适配基础上，跟进 **v5.2 契约弹性 + Windows 写文件策略 + 自测责任分工**；**v5.3 契约校验收敛为「阶段3后唯一闸门」、`interfaces[]` 简化为 absent-only、`subjective` 改可选、熔断/回退轮次/AC 记录术语三分、删去对本文的外链引用**；**v5.4 阶段0 升级为「需求理解 + grilling 澄清 + 写 spec」**，产出 `.orchestration/spec.md` 作为阶段1 契约与任务卡的唯一输入）
 
 本文件说明 `quad-collaboration` 技能在**协调架构、通信机制、知识共享、异常协同**四个维度的设计思路。这是"为什么这么设计"，`SKILL.md` 是"怎么执行"。
+
+> ⚠️ **自 v5.3 起 `SKILL.md` 已自包含、不再外链本文**（对齐项目 CLAUDE.md「禁止通用 brainstorming」约束，执行时只读 SKILL.md）。本文保留为独立的**设计原理说明**，供理解"为什么"，不再是 SKILL 的执行依赖。
 
 ---
 
@@ -35,7 +37,7 @@
 
 ```
 Claude（编排者 & 唯一执行者）
-   │   阶段0-1 拆解 → 写任务卡 → 判断顺序/并行
+   │   阶段0 需求澄清+写 spec → 阶段1 拆解→写任务卡→判断顺序/并行
    ▼
 codex（实现者）─────────── 阶段2
    │   产出业务代码
@@ -67,6 +69,7 @@ Claude（验收者）────────── 阶段4
 
 | 机制 | 承载什么 | 方向 |
 |------|---------|------|
+| `spec.md`（`.orchestration/`） | **阶段0 澄清产物——阶段1 `contract.json` 与任务卡的唯一输入**（目标/约束/技术栈/输入输出/验收标准） | 下行（v5.4） |
 | `codex_task.md` | Claude → codex 的一次性完整需求（功能、验收条件、禁止事项、文件路径） | 下行 |
 | `opencode_task.md` | Claude → opencode 的测试/文档任务 | 下行 |
 | `contract.json` | **机器可校验的接口契约**（签名/文件/数据格式/验收标准+版本号） | 下行（共享） |
@@ -84,7 +87,7 @@ Claude（验收者）────────── 阶段4
 - **反馈采用同步轮询**：由于 codex/opencode 是独立 CLI 进程，没有 IPC 通道，agent 无法在运行中主动发消息给 Claude。反馈机制是 agent 遇到问题时写 `feedback.md`，**Claude 等 agent 完成后跑 `feedback_loop.sh check` 轮询**。这是多智能体独立进程架构下的现实选择——简单可靠，延迟对"需求不符"类场景影响不大。
 - **熔断防止死循环**：每次反馈消耗计数 +1，连续 3 轮（可配）自动升级用户；每次裁决必须改变状态（改契约/任务卡），禁止连续两次做同样裁决。
 
-> ⚠️ **固有风险（v3 已针对缓解）**：流水线本没有消息总线，上下文在每次跨进程交接时都会**压缩失真**（Claude 意图→任务卡→codex 实现→opencode 测试→Claude 验收，链越长偏得越多）。v3 引入 `contract.json` + `validate_contract.sh` + `state.json`，把纠偏从**事后**前移到**每次交接立即校验**。反馈机制进一步在**过程中**捕获偏差，见 §反馈处理流程。真正的上下文语义只有靠阶段0需求确认 + 阶段4逐条对照不断缩小，无法完全消除。
+> ⚠️ **固有风险（v3 已针对缓解）**：流水线本没有消息总线，上下文在每次跨进程交接时都会**压缩失真**（Claude 意图→spec/任务卡→codex 实现→opencode 测试→Claude 验收，链越长偏得越多）。v3 引入 `contract.json` + `validate_contract.sh` + `state.json`，把纠偏从**事后**前移到**交接即校验**（v5.3 收敛为：阶段2 后只跑 `interfaces[].absent` 轻量门，**全量契约在阶段3 后是唯一一次闸门**）。反馈机制进一步在**过程中**捕获偏差，见 §反馈处理流程。真正的上下文语义只有靠阶段0 需求澄清 + 阶段4 逐条对照不断缩小，无法完全消除。
 
 ---
 
@@ -113,6 +116,14 @@ Claude 读所有产出 → 验收（汇聚全部知识）
   - codex 不写测试 → 不与 opencode 抢同一文件
   - 验收时检查双方谁越权改了谁的文件（已实战验证有效）
 - **接口先钉死**：任务卡里提前写明接口签名/数据格式，让 Codex 与 OpenCode 照同一契约工作，从源头减少知识分歧。**v3 把它升级成 `contract.json` 机器契约 + `validate_contract.sh` 自动校验**——不再依赖 agent 自觉，跨进程交接即用 exit code 判定"契约是否一致"。契约是唯一真相：代码跟契约走，不是契约跟代码走。
+
+### 契约弹性与收敛（v5.2 / v5.3）—— 让机器契约"可用而不脆"
+
+- **契约弹性（v5.2）**：机器契约不能只满足"机器能跑"，还要扛得住实现层的**合法变体**。`acceptance[].type: contains` 的 `text` 一律写**最小公共子串**（如 `billRepository.insert(` 而非 `billRepository.insert(bill)`），预留 5-10% 弹性——实现层选 `Collections.singletonList(bill)` 这类变体也不误报；Java/SQL/JSON 字面量因外层包装不可控，尤其要写子串。
+- **断言收敛（v5.3）**：
+  - `interfaces[]` **仅记录 absent**（"绝不能出现的旧符号"，防重构漏删）；"必须存在的符号"由 `acceptance[].type: contains` 覆盖——单一职责，避免双轨。
+  - `subjective` 由默认改为**可选**：多数场景无主观 AC，机器可验条目就是唯一契约尺；无法机器验证时才用它（不参与阶段3 自动校验，阶段4 人工核验写回 `state.json`）。
+  - **全量契约校验只跑一次**：阶段2 后仅 `--phase=2` 跑 absent 轻量门；**阶段3 后跑全量（唯一闸门）**，对照"codex 实现 + opencode 测试"双产出，避免单靠 codex 产物 false negative。
 
 ### 源码根自动对准（v5）—— 给 codex "找对落盘位置"
 
@@ -158,7 +169,7 @@ run_agent.sh（file-first）→ 优先读 source_roots.json；文件不存在才
 
 **② 阶段门禁异常（产出被判定不合格）** —— Claude 打回重跑
 - 归属判定：问题在实现 → 回阶段 2；在测试/文档 → 回阶段 3。
-- 熔断机制：每类最多重试 **2 轮**，超限停止并向用户报告阻塞原因，防死循环浪费 token。
+- 回退轮次（v5.3 术语规范，不再用"熔断"）：实现 ≤ **2 轮**、测试/文档 ≤ **2 轮**，**分开计数**（避免"先改测试再改实现"挤占同一份额）；超限停止并向用户报告阻塞原因，防死循环浪费 token。"熔断"一词专指反馈流程的 `feedback_loops` 总闸（默认 3 轮，见 §反馈处理流程）。
 
 **③ 并行冲突（新增 v2）** —— 引入**冲突解决 agent**
 - 触发：并行合并时文件 conflict，或两模块对同一接口/语义理解不一致。
@@ -176,6 +187,12 @@ run_agent.sh（file-first）→ 优先读 source_roots.json；文件不存在才
 - **决策**：**不改 run_agent.sh 等脚本硬编码平台提示**——技能跨 OS 通用，Linux/macOS 上误加会污染任务卡。改由 **Claude 编排时判断当前 OS**（win32）决定是否注入：Windows 才在每份任务卡标题下加 `## ⚠️ 运行环境提示（Windows / PowerShell）` 段，指明实际 shell 与正确的写文件姿势（PowerShell here-string + `Set-Content -Encoding UTF8`，内容统一 UTF-8 保证中文注释不乱码）。
 - **为什么在任务卡**：任务卡是编排者的产物，Claude 运行时自知平台，注入时机最准确；脚本保持平台无关，改动面最小。规则已固化进 SKILL.md 阶段 1（任务卡须按运行 OS 动态注入），使每次编排自动遵守、不再靠 agent 试错。
 
+### 自测责任分工（v5.2）—— codex 别在 javac/mvn 上兜圈
+
+- **背景**：后端 Maven 项目的 `mvn compile` / `javac` 自测，codex 平均耗时 10-15 分钟（编码仅 5 分钟），收益为负。
+- **决策**：codex 的"自测"仅对**前端类**项目（`npm test` / `node --test`）有意义；后端 Maven 项目在任务卡明文写「**编译验证由阶段 4 跑，codex 不要自行 javac/mvn**」，节省 5-10 分钟。
+- **为什么在任务卡**：同 v5.1 的运行环境提示——平台/项目差异属于编排时的上下文，Claude 在阶段 1 按项目类型注入任务卡，脚本保持平台无关。
+
 ---
 
 ## 变更记录
@@ -186,8 +203,12 @@ run_agent.sh（file-first）→ 优先读 source_roots.json；文件不存在才
 | v2 | + 复杂时自动切并行（git worktree 隔离）；+ 冲突解决 agent；+ 四维度设计说明（本文） |
 | v3 | **通信可靠性增强**：+ `contract.json` 机器契约（接口/文件/数据格式/验收条件）+ `validate_contract.sh` 每次交接自动校验 + `state.json` 状态机 + 产物 hash（防陈旧） |
 | v4 | **上行反馈通道**：+ `feedback.md` + `feedback_loop.sh`（`check`/`consume`/`reset`）——agent 遇阻塞写文件、Claude 完成后轮询接管，带熔断(默认3轮)防死循环；解决并行定义歧义；run_agent 前后台模式；验收归属客观判定 |
+| v4.1 | run_agent.sh 可写区参数规范为 `--add-dir`（显式给根→不自动探查，尊重显式意图） |
 | v5 | **源码根自动对准**：+ `probe_src_roots.sh`（通用探查 backend/frontend/other 三类源码根，多语言清单，不硬编码路径）+ `write_source_roots.cjs`（生成带中文注释的 `source_roots.json`）+ `run_agent.sh` 改 file-first（优先读 `source_roots.json`、剥离 `//` 注释解析，文件缺失才探查并写回）、新增 `--add-root <type>` / `EXPLICIT_ADD_ROOTS=1`(all) 可写区注入、多根逐个 `--add-dir`。根治并行 worktree「实现了却无处落盘」的历史大坑 |
 | v5.1 | **跨平台写文件适配**：+ SKILL.md 阶段1 新增「任务卡须按运行 OS 动态注入运行环境提示」——Claude 编排时判断当前 OS，Windows 才在每份任务卡标题下注入 `## ⚠️ 运行环境提示（Windows / PowerShell）` 段（禁 bash heredoc / apply_patch 塞命令行参数，改用 PowerShell here-string + `Set-Content -Encoding UTF8`），Linux/macOS 不加。**不改脚本**（run_agent.sh 等保持平台无关），平台判断留在编排时 |
+| v5.2 | **契约弹性 + Windows 写文件策略 + 自测责任分工**（基于 2026-08-12/13 本地工程复盘）：`contains` 断言写最小公共子串留 5-10% 弹性（防实现层合法变体误报）；Windows 写文件姿势（PowerShell here-string + `Set-Content -Encoding UTF8`、`Get-Content -Replace` 小步替换而非整段重写）写进任务卡而非脚本；codex 自测仅前端类项目有意义，后端 Maven 编译验证由阶段 4 独立跑 |
+| v5.3 | **契约校验收敛 + 术语规范**：删除阶段2 后全量契约校验（仅阶段3 后唯一一次闸门，阶段2 只跑 `interfaces[].absent` 轻量门）；`interfaces[]` 简化为 absent-only；`subjective` 由默认改可选；契约版本升级条件明确化（接口增删必升、AC 文本调整不升）；熔断/回退轮次/AC 记录三分；**删去对 README.md 的外链引用**（SKILL 自包含，执行只读 SKILL.md） |
+| v5.4 | **阶段0 升级为「需求理解 + grilling 澄清 + 写 spec」**：衔接 Matt `grilling` 技能逐轮澄清需求，产出 `.orchestration/spec.md` 作为阶段1 `contract.json` 与任务卡的唯一输入；内置 grilling 检测 + 自动安装（`git clone` mattpocock/skills，缺失即装） |
 
 ---
 
