@@ -17,13 +17,15 @@ AGENT="${1:?用法: run_agent.sh <agent> <project_dir> <prompt> [--background] [
 PROJECT_DIR="${2:?缺 project_dir}"
 PROMPT="${3:?缺 prompt}"
 MODE="foreground"
+DRY_RUN=0
 SANDBOX_ROOT=""
 ADD_ROOT=""
-# 解析可选参数：--background / --add-dir <dir> / --add-root <type>（可任意顺序）
+# 解析可选参数：--background / --add-dir <dir> / --add-root <type> / --dry-run（可任意顺序）
 shift 3
 while [ $# -gt 0 ]; do
   case "$1" in
     --background) MODE="background"; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
     --add-dir) SANDBOX_ROOT="${2:?--add-dir 需要 <dir>}"; shift 2 ;;
     --add-root) ADD_ROOT="${2:?--add-root 需要 <type>}"; shift 2 ;;
     *) echo "❌ 未知参数: $1"; exit 9 ;;
@@ -166,14 +168,42 @@ case "$AGENT" in
   #   --add-dir …               → 把"真实源码树根"加进可写区（可多个，逐个 --add-dir）
   # 并行 git worktree 时，PROJECT_DIR 传 worktree 根，自动探查会把 worktree 内后端/前端源码根加进来，
   # 使 codex 按相对源码根路径写入的目标落在可写区内，避免只能写在 cwd 而源码树 `Access denied`。
+  #
+  # -c model_reasoning_effort=<high|medium|low>：codex 推理努力，默认 high（实现/重构任务受益于高推理），
+  #   用环境变量 CODEX_REASONING 覆盖（想省 token/降速可设 medium）。
   codex)
-    CMD=("$CLI_BIN" -C "$PROJECT_DIR_CANON" exec --sandbox workspace-write --skip-git-repo-check -m gpt-5-codex)
+    CMD=("$CLI_BIN" -C "$PROJECT_DIR_CANON" exec --sandbox workspace-write --skip-git-repo-check -m gpt-5-codex -c "model_reasoning_effort=${CODEX_REASONING:-high}")
     for ad in "${ADD_DIRS[@]}"; do CMD+=("--add-dir" "$ad"); done
     CMD+=("$PROMPT")
     ;;
   opencode) CMD=("$CLI_BIN" run --dir "$PROJECT_DIR_CANON" --auto "$PROMPT") ;;
   *) echo "❌ 未知 agent: $AGENT"; exit 3 ;;
 esac
+
+# —— 启动前打印完整 codex/opencode 命令（排查"退出但无产出"/可写区对不对时一眼核对）——
+# 拼回人类可读的命令行（仅用于展示，不影响实际执行）
+print_cmd() {
+  local out=""
+  for tok in "${CMD[@]}"; do
+    # 含空格的 token（如任务卡多行内容、含空格路径）用单引号包起来，便于复制回终端复跑
+    if [[ "$tok" == *[[:space:]]* ]]; then
+      out+="'${tok}' "
+    else
+      out+="$tok "
+    fi
+  done
+  printf '%s\n' "$out"
+}
+
+echo "▶️ 启动 $AGENT（mode=$MODE, reasoning=${CODEX_REASONING:-high}, add-dir: ${ADD_DIRS[*]}）"
+echo "▶️ 完整命令:"
+print_cmd
+
+# —— dry-run：只打印不执行，用于排查可写区/模型/沙箱配置是否正确 ——
+if [ "$DRY_RUN" = "1" ]; then
+  echo "⏸️  --dry-run 模式：不执行，仅预览命令。"
+  exit 0
+fi
 
 if [ "$MODE" = "background" ]; then
   LOG_DIR="$PROJECT_DIR_CANON/.orchestration/logs"
@@ -187,7 +217,6 @@ if [ "$MODE" = "background" ]; then
   exit 0
 fi
 
-echo "▶️ 启动 $AGENT ... (add-dir: ${ADD_DIRS[*]})"
 "${CMD[@]}"
 EXIT_CODE=$?
 echo ""
