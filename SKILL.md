@@ -1,11 +1,11 @@
 ---
 name: quad-collaboration
-description: 多智能体流水线协作：Claude 规划→codex 实现→opencode 测试/文档→Claude 严格验收。默认顺序，复杂时自动切并行；异常时引入冲突解决 agent。触发词：/quad、多智能体协作、用 codex+opencode 一起干。
+description: 多智能体流水线协作：Claude 规划（需求澄清→spec）→codex 实现→opencode 测试/文档→Claude 严格验收。默认顺序，复杂时自动切并行；异常时引入冲突解决 agent。触发词：/quad、多智能体协作、用 codex+opencode 一起干。
 ---
 
 # Quad Collaboration — 多智能体分工流水线
 
-**版本 v5.3**：v4 修复并行 worktree「codex 退出但无产出」；v4.1 将 run_agent.sh 的可写区参数规范为 `--add-dir`；v5 新增「源码根自动对准」——新增 `probe_src_roots.sh` 自动探查 backend/frontend/scripts/other 各类型源码根；**v5.2 新增契约弹性 + Windows写文件策略 + 自测责任分工**（基于 2026-08-12/13 本地工程复盘）；**v5.3 修复7 处逻辑冲突与设计缺陷**：
+**版本 v5.4**：**阶段0 升级为「需求理解 + grilling 澄清 + 写 spec」**——衔接 Matt `grilling` 技能逐轮澄清需求，产出 `.orchestration/spec.md` 作为阶段1 contract.json 与任务卡的唯一输入；并内置 grilling 的**检测 + 自动安装**（`git clone` `mattpocock/skills`，缺失即装）。澄清环节的方法在 grilling 技能自身，本文件只在阶段0 引用、不重复。**前序**：v4 修复并行 worktree「codex 退出但无产出」；v4.1 将 run_agent.sh 的可写区参数规范为 `--add-dir`；v5 新增「源码根自动对准」——新增 `probe_src_roots.sh` 自动探查 backend/frontend/scripts/other 各类型源码根；**v5.2 新增契约弹性 + Windows写文件策略 + 自测责任分工**（基于 2026-08-12/13 本地工程复盘）；**v5.3 修复7 处逻辑冲突与设计缺陷**：
 - 删除阶段2后重复契约校验（仅留阶段3后唯一一次闸门）
 - `interfaces[]` 简化为 absent-only（避免与 `acceptance` 双轨）
 - `subjective` 由默认改为可选
@@ -33,10 +33,24 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 | `git` | 并行模式 git worktree 隔离 | — | 并行不可用，顺序可用 |
 | `sha256sum` | state.sh 产物指纹 | —(可选) | 自动退回 node 计算 |
 | `jq` | 校验参考 | —(可选) | 不需要，纯 node 实现 |
+| **Matt `grilling` 技能** | 阶段0 需求澄清 | `git clone https://github.com/mattpocock/skills.git` 并复制 grilling 目录 | 阶段0 自动检测+安装（见下） |
+
+**Matt 需求澄清技能（grilling）——检测与安装**（阶段0 的第一步；缺失则装，装好才继续澄清）：
+- **检测**：`test -f "$HOME/.claude/skills/grilling/SKILL.md"` 返回 0 即已装。`~/.claude/skills` 下的条目可能是符号链接，`test -f` 会自动跟随到真实文件，无需特判。
+- **安装（缺失时）**：
+  ```bash
+  TMP=$(mktemp -d)
+  git clone --depth 1 https://github.com/mattpocock/skills.git "$TMP/skills"
+  # grilling 在仓库内路径 skills/productivity/grilling/（若后续还需 to-spec，其在 skills/engineering/to-spec/，一并复制）
+  cp -r "$TMP/skills/skills/productivity/grilling" "$HOME/.claude/skills/"
+  rm -rf "$TMP"
+  ```
+- 装完**必须复检** `test -f "$HOME/.claude/skills/grilling/SKILL.md"`；仍失败则向用户报错（网络不通 / 权限不足）并停下，**不要跳过澄清直接开干**。
 
 **自动安装触发点**：
 - `scripts/ensure_deps.sh [codex|opencode|all]` —— 统一检测+安装，缺啥装啥
 - `scripts/run_agent.sh codex|opencode ...` —— 启动 agent 前自动调用 ensure_deps 对应项，未装则装、装失败则终止并给出手动命令
+- **阶段0 开始前** —— 检测 grilling 技能，缺失按上面步骤安装（流程依赖，不装就进不了澄清环节）
 
 > 各阶段开始前可先 `scripts/ensure_deps.sh` 一次，确保 npm+node+git 就绪，避免中途才发现缺工具。
 
@@ -104,18 +118,24 @@ description: 多智能体流水线协作：Claude 规划→codex 实现→openco
 
 **顺序模式严格按序；并行模式阶段 2 与 3 同时进行，其余同。** 前一阶段未完成不得进入下一阶段。
 
-### 阶段 0：需求理解（Claude）
+### 阶段 0：需求理解 + 澄清 + 写 spec（Claude）
 
-1. 读取用户需求，明确：目标、约束、技术栈、输入/输出
-2. **【API 签名前置勘察】** 若需求涉及调用第三方/平台接口，**先 grep 现有同类用法 2-3 处**确认真实签名：
+> 本阶段把一句需求变成 `.orchestration/spec.md`——它是阶段1 `contract.json` 与任务卡的**唯一输入**。需求越模糊本阶段越要认真；需求已明确也要走一遍（产出 spec 再进阶段1），只是澄清可以一轮快速带过。
+
+1. **【检测 Matt 澄清技能】** 执行 `test -f "$HOME/.claude/skills/grilling/SKILL.md"`；不存在则按「外部依赖」里的安装步骤装好 grilling 再继续（装不上就报错停下，别跳过澄清直接开干）。
+2. **【需求澄清】** 按 **`grilling` 技能的方法**逐轮澄清（方法见 grilling 技能自身，不在此重复）：把待定决策画成"决策树"，每轮只问"前置条件已满足、现在就能答"的问题，逐条附推荐答案，等用户答完再进下一轮，直到无歧义。需求明确、无待定分支时做一轮快速确认即可，不做无谓追问。
+3. **【写 spec】** 把澄清结果综合成 `.orchestration/spec.md`，至少含：目标、约束、技术栈、输入/输出、**验收标准**。验收标准为阶段1 的 `contract.json.acceptance` 铺路——每条都要可核验（能落成 `test_cmd`/`file_exists`/`contains`），避免"看起来对"这类主观表述。
+4. **【API 签名前置勘察】** 若需求涉及调用第三方/平台接口，**先 grep 现有同类用法 2-3 处**确认真实签名：
    - 例：调用 `billRepository.insert(单实体)` → 先 `grep -rn "billRepository.insert" <项目>/src/main/java/.../impl/` 看实际签名（往往 `IBillRepository` 只有 `List<T>` 重载）
    - 例：调用 `gzwBatchReportUtil.sendSingleReport` → 找同类 caller 确认参数结构（request 字段命名、必填项）
    - 例：HTTP 调用工具类 → 找现有实现确认请求/响应结构
    - **目的**：把真实签名/参数写到任务卡里，避免 codex 现查现改浪费时间。代价：2-3 个 grep；收益：单文件改动任务省 5-10 分钟
-3. 判断是否适合流水线（过于简单的任务可由 Claude 直接完成，但要向用户说明跳过理由）
-4. 输出：一段话确认理解，等待用户确认（或自动继续，取决于用户偏好）
+5. 判断是否适合流水线（过于简单的任务可由 Claude 直接完成，但要向用户说明跳过理由）
+6. 把 spec.md 给用户确认；确认后进阶段1（阶段1 的 contract.json 与任务卡从 spec.md 生成，AC 编号与 spec 验收标准对齐）
 
 ### 阶段 1：拆解分工（Claude）
+
+> 以阶段0 的 `.orchestration/spec.md` 为唯一输入：`contract.json` 的 acceptance 与任务卡的 AC 编号，必须对齐 spec.md 的验收标准。运行中若 spec 有变，先回阶段0 更新 spec.md 再回本阶段。
 
 在项目根目录创建：
 ```
@@ -336,6 +356,8 @@ cd <project-dir> && node --test test/
 #### 4.2 逐条核验验收标准（Accept Criteria）——同一把尺子
 
 按 `contract.json` 的 `acceptance` **逐条对照同一个 AC 编号**打分，不是凭感觉：
+
+- 先打开阶段0 的 `.orchestration/spec.md` 与 `contract.json` 并排对照：确认 `contract.acceptance` **完整覆盖** spec 的验收标准；spec 有而 contract 没有的条目，先补进 contract 再验收，不留空。
 
 - **机器可验条目（`test_cmd`/`file_exists`/`contains`）**：由 `validate_contract.sh` 在阶段 3 后自动跑过，阶段 4 复跑确认。
 - **`subjective` 条目**（若契约有此类条目）：单独人工核验，逐一执行并把结论**机器写回** `state.json`：
